@@ -1,0 +1,122 @@
+#include <stdio.h>
+#include "sdkconfig.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/timers.h"
+#include "freertos/queue.h"
+#include "esp_system.h"
+#include "esp_spi_flash.h"
+#include "driver/gpio.h"
+#include "esp_intr_alloc.h"
+
+#define GPIO_LED_NUM 2 
+#define GPIO_KEY_NUM 0
+
+// Определение ручки таймера мигания светодиода
+TimerHandle_t LED_Timer_Handle;
+// Объявление функции обратного вызова таймера
+void LED_Timer_Callback(TimerHandle_t xTimer);
+
+// Определение ручки таймера мигания светодиода
+TimerHandle_t Key_Timer_Handle;
+// Объявление функции обратного вызова таймера
+void KEY_Timer_Callback(TimerHandle_t xTimer);
+
+// Определяем дескриптор очереди сообщений значения ключа
+QueueHandle_t Key_Queue;
+
+// функция обработки прерывания gpio
+static void gpio_isr_handler(void* arg)
+{
+    xTimerResetFromISR(Key_Timer_Handle,NULL);
+}
+
+void app_main(void)
+{
+    BaseType_t ret = 0;
+    // Распечатать Hello world!
+    printf("Hello world!\n");
+
+    // Определяем структуру конфигурации gpio
+    gpio_config_t gpio_config_structure;
+
+    // Инициализируем структуру конфигурации gpio
+    gpio_config_structure.pin_bit_mask = (1ULL << GPIO_LED_NUM);// выбираем gpio2
+    gpio_config_structure.mode = GPIO_MODE_OUTPUT;              // Режим вывода
+    gpio_config_structure.pull_up_en = 0;                       // Нет подтягивания
+    gpio_config_structure.pull_down_en = 0;                     // Нет опускания
+    gpio_config_structure.intr_type = GPIO_PIN_INTR_DISABLE;    // Отключить прерывание 
+
+    // Инициализировать и включить в соответствии с заданными параметрами  
+	gpio_config(&gpio_config_structure);
+
+    // Инициализируем структуру конфигурации gpio
+    gpio_config_structure.pin_bit_mask = (1ULL << GPIO_KEY_NUM);// выбираем gpio0
+    gpio_config_structure.mode = GPIO_MODE_INPUT;               // Режим ввода
+    gpio_config_structure.pull_up_en = 0;                       // Нет подтягивания
+    gpio_config_structure.pull_down_en = 0;                     // Нет опускания
+    gpio_config_structure.intr_type = GPIO_PIN_INTR_NEGEDGE;    // Прерывание триггера по спадающему фронту
+
+    // нициализировать и включить в соответствии с заданными параметрами
+	gpio_config(&gpio_config_structure);
+
+    // Включить службу прерывания gpio
+    gpio_install_isr_service(ESP_INTR_FLAG_LEVEL1);    // УРОВЕНЬ1 - самый низкий приоритет
+    // Устанавливаем функцию обратного вызова прерывания GPIO
+    gpio_isr_handler_add(GPIO_KEY_NUM, gpio_isr_handler, (void*) GPIO_KEY_NUM);
+
+    // Вывод высокого уровня, загорается светодиод
+    gpio_set_level(GPIO_LED_NUM, 1);
+
+    LED_Timer_Handle = xTimerCreate((const char*)"LED Timer",                   // Название программного таймера
+						            (TickType_t )(1000 / portTICK_PERIOD_MS),   // Временной период, единица измерения - тактовая частота
+							        (UBaseType_t)pdTRUE,                        // Режим таймера, будь то периодический режим таймера
+							        (void*)1,                                   // ID-номер таймера
+							        (TimerCallbackFunction_t)LED_Timer_Callback);// Функция обратного вызова таймера
+    if((LED_Timer_Handle != NULL))
+        ret = xTimerStart(LED_Timer_Handle,0);	    // Создано успешно, запускаем таймер
+    else
+        printf("LED Timer Create failure !!! \n");  // Не удалось создать таймер
+    
+    if(ret == pdPASS)
+        printf("LED Timer Start OK. \n");           // Таймер успешно запустился
+    else
+        printf("LED Timer Start err. \n");          // Таймер не запустился
+
+    // Создаем таймер обнаружения ключа, 50 мс, единичный тайминг
+    Key_Timer_Handle = xTimerCreate("Key Timer", (50/portTICK_PERIOD_MS), pdFALSE, (void*)1, KEY_Timer_Callback);
+
+    // Создаем очередь сообщений об обнаружении ключа
+    Key_Queue = xQueueCreate((UBaseType_t )10,      // Длина очереди, это количество элементов в очереди, то есть сколько сообщений эта очередь может принять
+                             (UBaseType_t )50);     // Длина каждого сообщения в очереди в байтах
+
+    char msg[50];
+    while(1)
+    {
+        if(xQueueReceive(Key_Queue, msg, portMAX_DELAY)) 
+        {
+            printf("in app_main : %s \n", msg);
+        }
+        vTaskDelay(100 / portTICK_PERIOD_MS);                              // Задержка 100 мс
+    } 
+           
+}
+
+// Функция обратного вызова таймера
+void LED_Timer_Callback(TimerHandle_t xTimer)
+{
+    static int led_flag=0;
+    led_flag = !led_flag;                   // переворот уровня светодиода   
+    gpio_set_level(GPIO_LED_NUM, led_flag); // Установите уровень светодиода в соответствии с led_flag, чтобы светодиод мигал
+}
+
+void KEY_Timer_Callback(TimerHandle_t xTimer)
+{
+    static int key_times = 0;
+    char msg[50];
+    key_times++;
+    printf("BOOT KEY have pressed. \n");
+    sprintf(msg,"BOOT KEY have pressed %d times.",key_times);
+    xQueueSendFromISR(Key_Queue, msg, NULL);
+}
+
